@@ -21,7 +21,7 @@ cd D:\playground\claude\terrarium
 ## Portable build (USB stick)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File devuild_portable.ps1
+powershell -ExecutionPolicy Bypass -File dev\build_portable.ps1
 ```
 
 This makes `dist\Terrarium\` (about 34 MB) and `dist\Terrarium-portable.zip` (about 14 MB). Copy the folder to a stick and run

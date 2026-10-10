@@ -814,7 +814,8 @@ class Fireflies(Env):
         p[48] = mix((34, 60, 28), (150, 220, 96), .5 + .5 * math.sin(t * 1.7))
 
     def poke(self, x, y):
-        for _ in range(5):                          # release a little choir that flashes together
+        room = self.MAX - len(self.flies) - len(self.eggs)
+        for _ in range(min(5, max(0, room))):       # release a little choir that flashes together
             self.flies.append(self.new_fly(max(1., min(W - 2., x + self.rng.uniform(-3, 3))),
                                            max(self.TOP, min(H - 4., y + self.rng.uniform(-2, 2))), .98))
 
@@ -926,9 +927,10 @@ class SlimeMold(Env):
             self.pix[i] = 64 + min(3, amt // 25)
         self.timer -= 1
         if self.timer <= 0:                         # new oats fall: sooner when the dish is bare
+            bare = not food
             for _ in range(1 + int(r() * 2)):
                 self.drop(2 + int(r() * (W - 4)), 2 + int(r() * (H - 4)))
-            self.timer = (150 if not food else 500) + int(r() * 400)
+            self.timer = (150 if bare else 500) + int(r() * 400)
         if len(self.agents) < 20:                   # a dormant sclerotium wakes up
             x, y = 6 + r() * (W - 12), 6 + r() * (H - 12)
             self.agents += [[x, y, int(r() * D), FULL] for _ in range(60)]

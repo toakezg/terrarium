@@ -1,6 +1,6 @@
 # Terrarium
 
-A little shelf of living pixel environments: a digital desk garden for a side screen.
+A little shelf of six living pixel environments: a digital desk garden for a side screen.
 
 Each environment is a 96×64 world with its own physics and its own mood. Each one runs a loop where growth and decay
 pull against each other, so it never fills up and never dies out. It just keeps moving.
@@ -18,6 +18,18 @@ cd D:\playground\claude\terrarium
 
 (Reuses the Scribblefall venv; anywhere else: `pip install pygame-ce`.)
 
+## Portable build (USB stick)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File devuild_portable.ps1
+```
+
+This makes `dist\Terrarium\` (about 34 MB) and `dist\Terrarium-portable.zip` (about 14 MB). Copy the folder to a stick and run
+`Terrarium.exe`, or `Terrarium mini.cmd` for the corner widget. The other PC needs no Python and no install.
+It's a PyInstaller *folder* build on purpose: a one-file exe would unpack itself into the host's `%TEMP%` on every
+launch, while the folder runs straight off the stick. Screenshots go to `shots\` next to the exe, so they're on the stick too.
+Only the build machine needs [uv](https://docs.astral.sh/uv/).
+
 ## The environments
 
 | | mood | the loop |
@@ -26,12 +38,14 @@ cd D:\playground\claude\terrarium
 | **Ember Forest** | restless | trees spread from neighbours and darken as they age → lightning and drifting embers start fires that race downwind (older trees burn more readily) → ash crumbles back to soil. Population swings between ~1k and ~4k trees: boom, burn, regrow. |
 | **Crystal Garden** | focused | Packard snowflakes on a hex lattice: an empty cell freezes if its count of frozen neighbours is in this bloom's rule. Each bloom picks a rule, colour family and seed layout, grows, holds, then melts from the tips or from the heart, and a new one begins. |
 | **Pulse** | hypnotic | a Greenberg–Hastings excitable medium: cells fire, then rest. Propagation slowly drifts between perfect (crisp geometric diamonds) and lossy (fronts break and curl into self-sustaining spirals). The colours drift through the hue wheel over minutes. |
+| **Firefly Meadow** | dreamy | pulse-coupled oscillators: every flash nudges nearby fireflies closer to flashing. Coupling waxes and wanes, so the meadow drifts from scattered twinkling to waves of light rolling across the grass → fireflies that flash together lay glowing eggs in the grass → eggs hatch, old fireflies fade. Stars twinkle, grass sways under the moon. |
+| **Slime Mold** | curious | Physarum: hundreds of agents sniff the scent ahead, turn toward the strongest and leave scent behind, knitting a vein network between oat flakes → feeding makes it grow → when the oats run out it starves and pulls back → new oats fall. The veins slowly breathe (shuttle streaming). |
 
 ## Controls
 
 | | |
 |---|---|
-| click | poke the world: feed the pool, start a fire / plant trees, seed a crystal, drop a pulse |
+| click | poke the world: feed the pool, start a fire / plant trees, seed a crystal, drop a pulse, release fireflies, drop an oat flake |
 | double-click a tile · Tab | open it · back to the shelf |
 | ← → / wheel | switch environment (single + mini) |
 | M | mini mode (drag to move, right-click to poke) |
@@ -50,5 +64,7 @@ cd D:\playground\claude\terrarium
   additive blending.
 - Each env runs at its own `tempo` (steps/sec): Crystal breathes at 14, the forest at 24. Together they use well
   under 10% of one CPU core.
+- Slime Mold blurs its scent map without a per-pixel loop: the bytes are packed into 16-bit lanes of one big
+  Python integer, and shifted copies of it are added together.
 - Adding an environment is one class: `step()`, `animate(t)`, optionally `poke()`, `frame()` (for sprites like
   fish and embers) and `vitals()` (for the headless check). Then add it to `ENVIRONMENTS`.

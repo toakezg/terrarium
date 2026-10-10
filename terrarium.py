@@ -669,7 +669,292 @@ class Pulse(Env):
         return {"active": len(self.active), "firing": self.pix.count(1)}
 
 
-ENVIRONMENTS = [Tidepool, EmberForest, Crystal, Pulse]
+# ── Firefly Meadow ───────────────────────────────────────────────────────────
+class Fireflies(Env):
+    """Pulse-coupled oscillators: each firefly flashes on its own rhythm, and every flash nudges the
+    fireflies nearby a little closer to flashing. Coupling waxes and wanes, so the meadow drifts from
+    scattered twinkling to waves of light rolling across the grass. Fireflies that flash together court
+    and lay glowing eggs in the grass; the eggs hatch, and old fireflies fade out."""
+    name, mood, tempo = "Firefly Meadow", "dreamy", 20
+    glow = (16, 17, 18, 19, 41, 42, 43, 44, 45, 46, 48, 50)
+    TOP, MAX = 22, 64                               # fireflies keep below TOP; cap on fireflies + eggs
+    X, Y, VX, VY, PHASE, PERIOD, AGE, LIFE, FLASH = range(9)
+
+    def __init__(self, seed=None):
+        super().__init__(seed)
+        r = self.rng
+        self.ph = ph = r.random() * 6
+        p = self.palette
+        p[0:16] = ramp([(8, 10, 30), (20, 30, 64), (38, 62, 88)], 16)
+        p[20:24] = [shade((14, 22, 30), .8 + s * .12) for s in range(4)]
+        p[24:32] = ramp([(10, 26, 22), (26, 62, 42), (84, 128, 96)], 8)
+        p[32:36] = [shade((8, 16, 14), .8 + s * .12) for s in range(4)]
+        p[40] = (44, 50, 32)                        # a firefly between flashes
+        p[41:46] = ramp([(250, 255, 196), (200, 244, 96), (110, 160, 40)], 5)
+        p[46] = (64, 92, 28)                        # flash halo
+        p[50], p[51] = (238, 234, 210), (196, 194, 180)
+        hz = [26 + int(3 * math.sin(x / 11 + ph) + 2 * math.sin(x / 5 + 2 * ph)) for x in range(W)]
+        for _ in range(r.randint(6, 11)):           # conifers on the ridge
+            cx, h = r.randrange(W), r.randint(4, 11)
+            top = hz[cx] - h
+            for dx in range(-h // 2, h // 2 + 1):
+                if 0 <= cx + dx < W:
+                    hz[cx + dx] = min(hz[cx + dx], top + abs(dx) * 2)
+        self.meadow = [H - 12 + int(1.5 * math.sin(x / 7 + ph)) for x in range(W)]
+        for y in range(H):
+            for x in range(W):
+                if y < hz[x]:
+                    v = min(15, y * 16 // 30)
+                elif y < self.meadow[x]:
+                    v = 20 + r.randrange(4)
+                else:
+                    v = 32 + r.randrange(4)
+                self.pix[y * W + x] = v
+        for _ in range(45):
+            x, y = r.randrange(W), r.randrange(H)
+            if y < hz[x] - 1:
+                self.pix[y * W + x] = 16 + r.randrange(4)
+        mx, my = r.randrange(10, W - 10), r.randrange(5, 10)
+        for dy in range(-3, 4):
+            for dx in range(-3, 4):
+                if dx * dx + dy * dy <= 10 and my + dy < hz[mx + dx]:
+                    self.pix[(my + dy) * W + mx + dx] = 51 if (dx, dy) in ((1, -1), (-1, 1), (0, 2)) else 50
+        self.blades = [(x, self.meadow[x] + r.randrange(3), r.randint(3, 9), r.random() * 6)
+                       for x in range(W) for _ in range(2) if r.random() < .8]
+        self.grass, self.grass_at = None, -1
+        self.flies = [self.new_fly(r.uniform(2, W - 2), r.uniform(self.TOP, H - 4)) for _ in range(22)]
+        for f in self.flies:
+            f[self.AGE] = r.randrange(f[self.LIFE])
+        self.eggs = []
+        self.eps = 0.
+
+    def new_fly(self, x, y, phase=None):
+        r = self.rng
+        return [x, y, 0., 0., r.random() if phase is None else phase, r.uniform(34, 44), 0, r.randint(1600, 3200), 0]
+
+    def step(self):
+        super().step()
+        r = self.rng.random
+        X, Y, VX, VY, PHASE, PERIOD, AGE, LIFE, FLASH = range(9)
+        self.eps = eps = .003 + .06 * (.5 + .5 * math.sin(self.steps / 1400 + self.ph)) ** 2
+        flashed = []
+        for f in self.flies:
+            f[VX] = f[VX] * .94 + (r() - .5) * .07
+            f[VY] = f[VY] * .94 + (r() - .5) * .05
+            f[X] += f[VX]
+            f[Y] += f[VY]
+            if not 1 <= f[X] < W - 1:
+                f[VX], f[X] = -f[VX], max(1., min(W - 1.01, f[X]))
+            if not self.TOP <= f[Y] < H - 3:
+                f[VY], f[Y] = -f[VY], max(self.TOP, min(H - 3.01, f[Y]))
+            f[AGE] += 1
+            if f[FLASH]:
+                f[FLASH] -= 1
+            f[PHASE] += 1 / f[PERIOD]
+            if f[PHASE] >= 1:
+                f[PHASE], f[FLASH] = 0., 5
+                flashed.append(f)
+        for f in flashed:                           # each flash pulls nearby, nearly-ready fireflies forward
+            x, y = f[X], f[Y]
+            for g in self.flies:
+                if g[PHASE] > .2 and abs(g[X] - x) < 16 and abs(g[Y] - y) < 12:
+                    g[PHASE] += eps * (1 + g[PHASE])
+        crowd = len(self.flies) + len(self.eggs)
+        for f in flashed:                           # flashing in unison is courtship; easier when the meadow is sparse
+            for g in self.flies:
+                if g is not f and g[FLASH] >= 3 and abs(f[X] - g[X]) < 8 and abs(f[Y] - g[Y]) < 6 \
+                        and crowd < self.MAX and r() < .2 + .6 * (1 - crowd / self.MAX):
+                    ex = int(f[X])
+                    self.eggs.append([ex, self.meadow[ex] + 1 + int(r() * 6), 500 + int(r() * 500)])
+                    crowd += 1
+                    break
+        self.flies = [f for f in self.flies if f[AGE] < f[LIFE]]
+        waiting = []
+        for e in self.eggs:
+            e[2] -= 1
+            if e[2] <= 0:
+                self.flies.append(self.new_fly(e[0] + .5, e[1] - 2.))
+            else:
+                waiting.append(e)
+        self.eggs = waiting
+        if len(self.flies) < 10 and r() < .01:      # a wanderer drifts in from the edge
+            self.flies.append(self.new_fly(1. if r() < .5 else W - 2., self.TOP + r() * (H - 4 - self.TOP)))
+
+    def frame(self):
+        if self.grass_at != self.steps:             # sway the grass once per step, not per frame
+            g = bytearray(self.pix)
+            t = self.steps * .045
+            for x, base, h, ph in self.blades:
+                sway = 1.6 * math.sin(t + x * .12 + ph) + .6 * math.sin(t * 2.3 + ph)
+                for k in range(h):
+                    px = x + round(sway * (k / h) ** 2)
+                    if 0 <= px < W and base - k < H:
+                        g[(base - k) * W + px] = 24 + k * 8 // h
+            self.grass, self.grass_at = g, self.steps
+        out = bytearray(self.grass)
+        for x, y, _ in self.eggs:
+            if y < H:
+                out[y * W + x] = 48
+        for f in self.flies:
+            i = int(f[self.Y]) * W + int(f[self.X])
+            fl = f[self.FLASH]
+            if fl:
+                out[i] = 46 - fl
+                if fl >= 3:
+                    for j in (i - 1, i + 1, i - W, i + W):
+                        out[j] = 46
+            else:
+                out[i] = 40
+        return out
+
+    def animate(self, t):
+        p = self.palette
+        for k in range(4):
+            p[16 + k] = shade((210, 216, 255), .55 + .45 * math.sin(t * (1.1 + k * .37) + k * 2.1))
+        p[48] = mix((34, 60, 28), (150, 220, 96), .5 + .5 * math.sin(t * 1.7))
+
+    def poke(self, x, y):
+        for _ in range(5):                          # release a little choir that flashes together
+            self.flies.append(self.new_fly(max(1., min(W - 2., x + self.rng.uniform(-3, 3))),
+                                           max(self.TOP, min(H - 4., y + self.rng.uniform(-2, 2))), .98))
+
+    def vitals(self):
+        n = len(self.flies)
+        c = sum(math.cos(f[self.PHASE] * math.tau) for f in self.flies)
+        s = sum(math.sin(f[self.PHASE] * math.tau) for f in self.flies)
+        return {"fireflies": n, "eggs": len(self.eggs), "sync": round(math.hypot(c, s) / max(1, n), 2),
+                "coupling": round(self.eps, 3)}
+
+
+# ── Slime Mold ───────────────────────────────────────────────────────────────
+class SlimeMold(Env):
+    """Physarum: hundreds of tiny agents each sniff the scent trail ahead (left, centre, right), turn
+    toward the strongest, step forward and leave scent behind. Scent spreads and evaporates, and the
+    agents knit themselves into a network of veins between oat flakes. Food makes the mould grow;
+    when it runs out the mould starves and pulls back until new oats fall."""
+    name, mood, tempo = "Slime Mold", "curious", 18
+    glow = tuple(range(44, 64)) + (64, 65, 66, 67)
+    DIRS, SA, RA, SO = 32, 4, 3, 4                  # headings, sensor angle, turn step, sensor distance
+    FULL, MAX = 500, 700                            # agent energy when fed; population cap
+
+    def __init__(self, seed=None):
+        super().__init__(seed)
+        r = self.rng
+        n = W * H
+        self.trail = bytearray(n)
+        self.lane_mask = int.from_bytes(b"\xff\x00" * n, "little")
+        self.dx = [math.cos(k / self.DIRS * math.tau) for k in range(self.DIRS)]
+        self.dy = [math.sin(k / self.DIRS * math.tau) for k in range(self.DIRS)]
+        self.decay = bytes(max(0, v * 93 // 100 - 1) for v in range(256))
+        self.shades = bytes(min(63, v >> 2) for v in range(256))
+        self.base = ramp([(16, 20, 22), (44, 40, 20), (150, 108, 26), (244, 196, 64), (255, 246, 196)], 64)
+        self.palette[0:64] = self.base
+        self.palette[64:68] = [shade((236, 222, 186), .8 + s * .07) for s in range(4)]
+        self.food = {}                              # pixel -> [amount, oat id]
+        self.oats = 0
+        self.timer = 0
+        cx, cy = r.uniform(20, W - 20), r.uniform(16, H - 16)
+        self.agents = [[cx + r.uniform(-4, 4), cy + r.uniform(-4, 4), r.randrange(self.DIRS), r.randint(200, self.FULL)]
+                       for _ in range(300)]
+        for _ in range(4):
+            self.drop(r.randrange(4, W - 4), r.randrange(4, H - 4))
+
+    def drop(self, x, y):
+        """Lay an oat flake: a little disc of food that smells irresistible."""
+        self.oats += 1
+        for dy in range(-2, 3):
+            for dx in range(-2, 3):
+                if dx * dx + dy * dy <= 5 and 0 <= x + dx < W and 0 <= y + dy < H:
+                    self.food[(y + dy) * W + x + dx] = [90, self.oats]
+
+    def spread(self, T):
+        """Blur the scent, (4·centre + 4 neighbours) / 8, for every pixel at once: pack the bytes into
+        16-bit lanes of one big integer and add shifted copies of it, so no per-pixel Python runs.
+        (Row ends bleed into the next row, but the agents bounce off the walls so the edges stay faint.)"""
+        lanes = bytearray(2 * W * H)
+        lanes[::2] = T
+        A = int.from_bytes(lanes, "little")
+        S = ((A << 2) + (A << 16) + (A >> 16) + (A << 16 * W) + (A >> 16 * W)) >> 3 & self.lane_mask
+        return bytearray(S.to_bytes(2 * W * H, "little")[::2])
+
+    def step(self):
+        super().step()
+        r = self.rng.random
+        T, food, dx, dy = self.trail, self.food, self.dx, self.dy
+        D, SA, RA, SO, FULL = self.DIRS, self.SA, self.RA, self.SO, self.FULL
+        for i in food:
+            T[i] = 255                              # oats give off scent
+        born, alive = [], []
+        for a in self.agents:
+            x, y, h, e = a
+            s = []
+            for k in (h - SA, h, h + SA):
+                sx, sy = int(x + dx[k % D] * SO), int(y + dy[k % D] * SO)
+                s.append(T[sy * W + sx] if 0 <= sx < W and 0 <= sy < H else 0)
+            left, mid, right = s
+            if mid >= left and mid >= right:
+                pass
+            elif left > right:
+                h -= RA
+            elif right > left:
+                h += RA
+            else:
+                h += RA if r() < .5 else -RA
+            h = (h + (1 if r() < .1 else -1 if r() < .11 else 0)) % D
+            nx, ny = x + dx[h], y + dy[h]
+            if not (0 <= nx < W and 0 <= ny < H):
+                h, nx, ny = int(r() * D), x, y      # bumped the dish wall
+            i = int(ny) * W + int(nx)
+            if i in food:
+                f = food[i]
+                f[0] -= 1
+                if f[0] <= 0:
+                    del food[i]
+                e = FULL
+                if r() < .04 and len(self.agents) + len(born) < self.MAX:
+                    born.append([nx, ny, int(r() * D), FULL])
+            elif T[i] < 120 or r() < .5:            # veins carry nutrients; lone wanderers starve faster
+                e -= 1
+            if e > 0:
+                T[i] = min(255, T[i] + 60)
+                a[:] = nx, ny, h, e
+                alive.append(a)
+        self.agents = alive + born
+        self.trail = T = self.spread(T).translate(self.decay)
+        self.pix[:] = T.translate(self.shades)
+        for i, (amt, _) in food.items():
+            self.pix[i] = 64 + min(3, amt // 25)
+        self.timer -= 1
+        if self.timer <= 0:                         # new oats fall: sooner when the dish is bare
+            for _ in range(1 + int(r() * 2)):
+                self.drop(2 + int(r() * (W - 4)), 2 + int(r() * (H - 4)))
+            self.timer = (150 if not food else 500) + int(r() * 400)
+        if len(self.agents) < 20:                   # a dormant sclerotium wakes up
+            x, y = 6 + r() * (W - 12), 6 + r() * (H - 12)
+            self.agents += [[x, y, int(r() * D), FULL] for _ in range(60)]
+
+    def animate(self, t):
+        p = self.palette
+        for k in range(1, 64):                      # shuttle streaming: the network slowly breathes
+            p[k] = shade(self.base[k], 1 + .14 * math.sin(t * 1.4 - k * .09) * k / 63)
+
+    def poke(self, x, y):
+        self.drop(x, y)
+
+    def vitals(self):
+        return {"agents": len(self.agents), "oats": len({o for _, o in self.food.values()}),
+                "veins": sum(1 for v in self.trail if v > 64)}
+
+
+ENVIRONMENTS = [Tidepool, EmberForest, Crystal, Pulse, Fireflies, SlimeMold]
+
+
+def app_dir():
+    """Where Terrarium lives: next to the script, or next to Terrarium.exe when packaged (so screenshots
+    land on the USB stick, never in the host PC's temp folder)."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 # ── the window ───────────────────────────────────────────────────────────────
@@ -699,15 +984,22 @@ class App:
         self.overlay_cache = {}
         self.drag = None
         self.last_click = (0, -1)
-        self.shots = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shots")
+        self.shots = os.path.join(app_dir(), "shots")
         self.toast = ("", 0)
         self.restore = None
         if args.mini:
             self.set_mode("mini")
 
+    def shape(self):
+        """Shelf layout (cols, rows): 2x2 for four environments, 3x2 for up to six, then 3 rows."""
+        rows = 2 if len(self.envs) <= 6 else 3
+        return -(-len(self.envs) // rows), rows
+
     def default_size(self, mode):
         if mode == "grid":
-            return (W * 8 + self.GAP * 3, H * 8 + self.GAP * 3)
+            cols, rows = self.shape()
+            s = 16 // cols                          # keep the shelf about as wide as the old 2x2
+            return (W * s * cols + self.GAP * (cols + 1), H * s * rows + self.GAP * (rows + 1))
         if mode == "single":
             return (W * 8, H * 8)
         return (W * 3, H * 3)
@@ -748,10 +1040,11 @@ class App:
             tw, th = int(W * s), int(H * s)
             return [(self.cur, R((w - tw) // 2, (h - th) // 2, tw, th))]
         g = self.GAP
-        s = min((w - 3 * g) / (2 * W), (h - 3 * g) / (2 * H))
+        cols, rows = self.shape()
+        s = min((w - (cols + 1) * g) / (cols * W), (h - (rows + 1) * g) / (rows * H))
         tw, th = int(W * s), int(H * s)
-        ox, oy = (w - 2 * tw - g) // 2, (h - 2 * th - g) // 2
-        return [(k, R(ox + (k % 2) * (tw + g), oy + (k // 2) * (th + g), tw, th)) for k in range(len(self.envs))]
+        ox, oy = (w - cols * tw - (cols - 1) * g) // 2, (h - rows * th - (rows - 1) * g) // 2
+        return [(k, R(ox + (k % cols) * (tw + g), oy + (k // cols) * (th + g), tw, th)) for k in range(len(self.envs))]
 
     def overlay(self, size):
         """Scanlines + soft vignette, cached per tile size."""
@@ -932,7 +1225,7 @@ def run_headless(steps, seed):
             if s % every == 0:
                 print(f"  step {s:5d}  " + "  ".join(f"{k} {v}" for k, v in env.vitals().items()))
         ms = (time.perf_counter() - t0) / steps * 1000
-        print(f"  {ms:.2f} ms/step  →  {ms * env.tempo / 10:.1f}% of one core at its tempo")
+        print(f"  {ms:.2f} ms/step  ->  {ms * env.tempo / 10:.1f}% of one core at its tempo")
 
 
 def main(argv=None):

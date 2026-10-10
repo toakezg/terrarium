@@ -6,11 +6,11 @@ Each environment is a tiny world with its own physics, its own mood, and a loop 
 growth and decay pull against each other, so it never fills up and never dies out.
 Leave it running on a side screen like a desk plant.
 
-    python terrarium.py              # 2x2 shelf of all environments
+    python terrarium.py              # the shelf: every environment side by side
     python terrarium.py --mini       # frameless always-on-top mini window, bottom-right
     python terrarium.py --headless 3000   # no window: run each env and print vital signs
 
-Keys:  Tab grid/single · M mini · ←/→ switch env · Space pause · click poke
+Keys:  Tab grid/single · M mini · ←/→ switch env · Space pause · click poke (Millpond: click casts / strikes, hold reels)
        R reseed · A auto-cycle · L scanlines · N labels · T on-top · O opacity · S snapshot · Esc
 In mini mode: drag to move, right-click to poke, wheel to switch.
 """
@@ -73,6 +73,13 @@ class Env:
 
     def poke(self, x, y):
         """React to a click at pixel (x, y)."""
+
+    def release(self):
+        """The mouse button that poked this world has been let go."""
+
+    def status(self):
+        """Lines of text to show on the tile (most worlds have nothing to say)."""
+        return ()
 
     def vitals(self):
         return {}
@@ -948,7 +955,735 @@ class SlimeMold(Env):
                 "veins": sum(1 for v in self.trail if v > 64)}
 
 
-ENVIRONMENTS = [Tidepool, EmberForest, Crystal, Pulse, Fireflies, SlimeMold]
+# ── Millpond ─────────────────────────────────────────────────────────────────
+class Fish:
+    """One Millpond fish. `mode`: swim, rise, flee, court, nibble, take, hooked or landing."""
+    __slots__ = ("x", "y", "vx", "ty", "kind", "age", "life", "hunger", "wary", "mode", "timer", "nibbles",
+                 "stamina", "seed")
+
+    def __init__(self, rng, x, y, kind, age, life):
+        self.x, self.y, self.ty, self.kind, self.age, self.life = x, y, y, kind, age, life
+        self.vx = rng.choice((-1, 1)) * rng.uniform(.1, .25)
+        self.hunger = rng.random()
+        self.wary = self.timer = self.nibbles = 0
+        self.mode = "swim"
+        self.stamina = 1.
+        self.seed = rng.randrange(8)
+
+
+class Millpond(Env):
+    """A freshwater pond seen from the bank: a jetty, an angler, and a day that turns to night.
+    Fish hatch from eggs laid on the weed, grow from fry to adults to old lunkers and die of age.
+    Adults spawn while the pond has room, so the stock rises toward what the pond can hold and
+    hovers there. Click the water to cast to that depth, sit out the nibbles, click when the float
+    goes under, then hold to reel and let go when the fish runs. Every fish you keep is one fewer to
+    spawn: fish the pond out and it takes a long, quiet while to come back."""
+    name, mood, tempo = "Millpond", "patient", 24
+    SURF, DOCK, DAY, K, ADULT = 20, 19, 7200, 16, 3000      # surface row, jetty end, steps per day, room, fry->adult
+    SPAWN, LURE = .00012, .0022                             # spawning odds per adult per step; how keen they are to bite
+    HAND, TIP, LAND = (18, 13), (35, 2), (22., 21.5)        # rod butt, rod tip at rest, where fish are landed
+    BITE = 19                                               # steps the float stays under: the strike window
+    KINDS = (  # name, odds, preferred depth (0 surface .. 1 bottom), strength
+        ("roach", .45, (0., .45), .55),
+        ("perch", .42, (.3, .75), .75),
+        ("carp", .13, (.65, 1.), 1.1),
+    )
+    SKY, STAR, TREE, BANK, WOOD, WATER, MUD, STONE, WEED = 0, 16, 20, 24, 28, 32, 48, 52, 56
+    PAD, FLOWER, REED, ORB, GLINT, LANTERN = 60, 62, 64, 68, 69, 70
+    LINE, FLOAT, FLOATW, WET, RIPPLE, SPLASH, EGG, MIDGE = 72, 73, 74, 75, 76, 77, 78, 79
+    FISH, ANGLER, METER, ROD, SPECK, MOTE, BAIT = 80, 96, 100, 104, 105, 106, 107
+    glow = (16, 17, 18, 19, 68, 69, 70, 73, 78)
+    SPRITE = ("..hh....",
+              ".hhhh...",
+              "..ff....",
+              ".cccc...",
+              ".ccccf..",
+              ".cccc...",
+              ".cccc...",
+              ".cbbbb..",
+              ".....b..",
+              ".....b..")
+
+    def __init__(self, seed=None):
+        super().__init__(seed)
+        r = self.rng
+        S = self.SURF
+        ph = r.random() * 6
+        self.clock0 = r.uniform(.1, .17)                    # start in late afternoon; dusk falls at .25
+        self.ground = [int(50 + 9 * math.sin(math.pi * x / 88) + 1.2 * math.sin(x / 6 + ph)) if x < 84
+                       else max(15 - (x - 90) // 2, 52 - (x - 84) * 6) for x in range(W)]
+        tree = [int(13 + 1.6 * math.sin(x / 8 + ph) + math.sin(x / 3.1 + 2 * ph)) for x in range(W)]
+        for _ in range(r.randint(7, 11)):                   # round crowns on the far shore
+            cx, rad = r.randrange(W), r.randint(3, 6)
+            top = S - 5 - rad - r.randrange(4)
+            for dx in range(-rad, rad + 1):
+                if 0 <= cx + dx < W:
+                    tree[cx + dx] = min(tree[cx + dx], top + dx * dx // rad)
+        self.stone = set()
+        for _ in range(r.randint(4, 6)):                    # stones on the bottom
+            cx, rad = r.randrange(24, 80), r.randint(1, 3)
+            for dx in range(-rad - 1, rad + 2):
+                x = cx + dx
+                if 0 <= x < W and self.ground[x] > S + 6:
+                    self.ground[x] = min(self.ground[x], self.ground[cx] - rad + abs(dx) // 2 + 1)
+                    self.stone.add(x)
+        for y in range(H):
+            for x in range(W):
+                gy = self.ground[x]
+                if y >= gy:
+                    if gy < S:
+                        v = self.BANK if y == gy else self.BANK + 1 + r.randrange(3)
+                    elif x in self.stone and y < gy + 3:
+                        v = self.STONE + r.randrange(4)
+                    else:
+                        v = self.MUD if y == gy else self.MUD + 1 + r.randrange(3)
+                elif y < S:
+                    v = self.TREE + r.randrange(4) if y >= tree[x] else min(15, y * 16 // S)
+                else:
+                    v = self.WATER if y == S else self.WATER + 1 + min(14, (y - S - 1) * 15 // (H - S - 1))
+                self.pix[y * W + x] = v
+        for _ in range(40):
+            x, y = r.randrange(W), r.randrange(S)
+            if self.pix[y * W + x] < 16:
+                self.pix[y * W + x] = self.STAR + r.randrange(4)
+        for x in range(self.DOCK + 1):                      # the jetty, its posts and a lantern
+            self.pix[17 * W + x] = self.WOOD + (2 if x % 5 == 0 else r.randrange(2))
+            self.pix[18 * W + x] = self.WOOD + 3
+        for x in (2, 9, 16):
+            for y in range(19, self.ground[x]):
+                self.pix[y * W + x] = self.WOOD + 2 + (y % 3 == 0)
+        for y in range(12, 17):
+            self.pix[y * W + 1] = self.WOOD + 3
+        self.pix[10 * W + 1] = self.WOOD + 3
+        self.pix[11 * W + 1] = self.LANTERN
+        for x, v in ((9, 53), (10, 53), (11, 53)):          # a bucket for the catch
+            self.pix[15 * W + x] = v
+            self.pix[16 * W + x] = 52
+        codes = {"h": 0, "f": 1, "c": 2, "b": 3}
+        for dy, row in enumerate(self.SPRITE):
+            for dx, ch in enumerate(row):
+                if ch in codes:
+                    self.pix[(8 + dy) * W + 13 + dx] = self.ANGLER + codes[ch]
+        for _ in range(r.randint(3, 4)):                    # lily pads lie flat on the surface
+            cx = r.randrange(42, 76)
+            for x in range(cx, cx + r.randint(2, 4)):
+                self.pix[S * W + x] = self.PAD + r.randrange(2)
+            if r.random() < .7:
+                self.pix[(S - 1) * W + cx + 1] = self.FLOWER
+        self.weeds = [[x, self.ground[x], r.randint(3, 8), r.random() * 6, r.randint(8, 16)]
+                      for x in r.sample(range(24, 82), 16) if self.ground[x] > S + 10]
+        self.reeds = [(x, self.ground[x], min(self.ground[x] - 3, r.randint(S - 12, S - 4)), r.random() * 6)
+                      for x in range(78, W) for _ in range(2) if self.ground[x] < S + 26 and r.random() < .65]
+        self.specks = [[r.uniform(0, W), r.uniform(S + 2, H - 4)] for _ in range(26)]
+        self.fish = []
+        for _ in range(11):
+            f = self.spawn(r.uniform(22, 80), None, age=r.randrange(40000))
+            f.age = min(f.age, int(f.life * .8))
+        self.eggs, self.motes, self.ripples, self.drops, self.midges = [], [], [], [], []
+        self.swarm = r.uniform(40, 80)
+        self.stray = r.randint(2400, 4800)
+        self.line = "idle"                                  # idle, cast, sink, wait, fight, land
+        self.bait = False
+        self.bx, self.by, self.depth = 0., 0., 0.
+        self.fly = (0., 0., 0, 0)                           # cast flight: start x, start y, step, steps
+        self.suitor = None
+        self.twitch = self.bite = self.warn = self.surge = self.slack = 0
+        self.tension = 0.
+        self.holding = False
+        self.kept = []
+        self.lost = 0
+        self.msg = ("click the water to cast", 10 ** 9)
+        self.light, self.dusk = self.daylight()
+        self.out_at = -1
+
+    # ── helpers ──
+    def daylight(self):
+        """Light 0 (midnight) .. 1 (noon), and how much of dusk or dawn is in the air (0..1)."""
+        phase = self.steps / self.DAY + self.clock0
+        light = .5 + .5 * math.cos(phase * math.tau)
+        return light, max(0., 1 - abs(light - .5) * 3)
+
+    def say(self, text, secs=3.):
+        self.msg = (text, self.steps + int(secs * self.tempo))
+
+    def stage(self, f):
+        return 0 if f.age < self.ADULT else 2 if f.age > f.life * .7 else 1
+
+    def cruise(self, f):
+        """A depth this fish likes, as a pixel row."""
+        lo, hi = self.KINDS[f.kind][2]
+        return self.SURF + 2 + self.rng.uniform(lo, hi) * 34
+
+    def spawn(self, x, y, kind=None, age=0):
+        r = self.rng
+        if kind is None:
+            kind = r.choices(range(3), [k[1] for k in self.KINDS])[0]
+        life = r.randint(48000, 60000) if kind == 2 else r.randint(36000, 48000)
+        f = Fish(r, x, 0., kind, age, life)
+        f.y = f.ty = self.cruise(f) if y is None else y
+        self.fish.append(f)
+        return f
+
+    def wet(self, x, y):
+        """Keep a point inside the water: below the surface, above the bottom, off the bank."""
+        x = max(1., min(W - 2., x))
+        while self.ground[int(x)] < self.SURF + 4:
+            x -= 1
+        return x, max(self.SURF + 1.5, min(self.ground[int(x)] - 1.5, y))
+
+    def strength(self, f):
+        return self.KINDS[f.kind][3] * (.5, 1., 1.4)[self.stage(f)]
+
+    def splash(self, x, n, rip=True):
+        r = self.rng.random
+        if rip:
+            self.ripples.append([x, 0., 14 + int(n * 2)])
+        for _ in range(n):
+            self.drops.append([x + (r() - .5) * 2, self.SURF - 1., (r() - .5) * .6, -.4 - r() * .5])
+
+    # ── the pond's own life ──
+    def step(self):
+        super().step()
+        r = self.rng.random
+        S = self.SURF
+        self.light, self.dusk = L, tw = self.daylight()
+        room = max(0., 1 - (len(self.fish) + len(self.eggs) * .4) / self.K)
+        adults = [f.kind for f in self.fish if f.age >= self.ADULT]
+        pairs = {k for k in adults if adults.count(k) > 1}  # a kind can only spawn with two adults left
+        alive = []
+        for f in self.fish:
+            f.age += 1
+            f.hunger = min(1., f.hunger + .0006)
+            if f.wary:
+                f.wary -= 1
+            if f.mode in ("hooked", "landing"):
+                alive.append(f)
+                continue
+            if f.age > f.life:                              # old age: it sinks quietly into the mud
+                self.motes.append([f.x, f.y])
+                if f is self.suitor:
+                    self.suitor = None
+                continue
+            alive.append(f)
+            self.behave(f, tw)
+            if f.mode == "swim" and f.age >= self.ADULT and f.kind in pairs and f.hunger < .75 \
+                    and r() < self.SPAWN * room and self.weeds:
+                self.lay(f)
+        self.fish = alive
+        hatched = []
+        for e in self.eggs:
+            e[2] -= 1
+            if e[2] > 0:
+                hatched.append(e)
+            elif r() < .65 and len(self.fish) < self.K + 4:
+                self.spawn(e[0] + .5, e[1] - 1., e[3])
+        self.eggs = hatched
+        if not pairs and not self.eggs:                     # fished out: wait for a stray from the stream
+            self.stray -= 1
+            if self.stray <= 0:
+                lone = [f.kind for f in self.fish if f.age >= self.ADULT]
+                kind = lone[0] if lone and r() < .7 else None
+                self.spawn(2., S + 6. + r() * 10, kind, self.ADULT + int(r() * 3000)).vx = .2
+                self.stray = self.rng.randint(2400, 4800)
+                if self.line in ("idle", "wait"):
+                    self.say("a newcomer swims in under the jetty", 4)
+        else:
+            self.stray = self.rng.randint(2400, 4800)
+        self.line_step()
+        self.weather(tw)
+
+    def behave(self, f, tw):
+        r = self.rng.random
+        S = self.SURF
+        if f.mode == "swim":
+            f.x += f.vx
+            f.y += (f.ty - f.y) * .03 + math.sin(self.steps * .2 + f.x) * .02
+            if r() < .008:
+                f.ty = self.cruise(f)
+            if r() < .004:
+                f.vx = -f.vx
+            ax = int(f.x + (2 if f.vx > 0 else -2))
+            if not 1 <= ax < W - 1 or f.y > self.ground[ax] - 2:
+                f.vx = -f.vx
+            if r() < .002:
+                f.hunger = max(0., f.hunger - .2)           # a snail, a nymph
+            if f.hunger > .3 and r() < .0016 * tw + .00012:
+                f.mode = "rise"
+        elif f.mode == "rise":                              # up to take a midge off the surface
+            f.x += f.vx
+            f.y -= .35
+            if f.y < S + 1.6:
+                self.splash(f.x, 1)
+                f.hunger = max(0., f.hunger - .3)
+                f.mode, f.ty = "swim", self.cruise(f)
+        elif f.mode == "flee":
+            f.x += f.vx
+            f.y += (f.ty - f.y) * .08
+            f.timer -= 1
+            if f.timer <= 0:
+                f.mode = "swim"
+                f.vx = math.copysign(.15, f.vx)
+        elif f.mode == "court":                             # nosing up to the bait
+            dx, dy = self.bx - f.x, self.by - f.y
+            f.vx = math.copysign(.15, dx)
+            f.x += max(-.2, min(.2, dx))
+            f.y += max(-.15, min(.15, dy))
+            if abs(dx) < .6 and abs(dy) < .6:
+                f.mode, f.timer = "nibble", self.rng.randint(15, 45)
+                f.nibbles = self.rng.randint(0, 3) + 2 * (self.stage(f) == 2)
+            elif r() < .003:
+                self.leave(f, 90)
+        elif f.mode == "nibble":
+            f.x = self.bx - (.4 if f.vx > 0 else -.4) + (r() - .5) * .3
+            f.timer -= 1
+            if f.timer <= 0:
+                if f.nibbles:
+                    f.nibbles -= 1
+                    f.timer = self.rng.randint(12, 44)
+                    self.twitch = 3
+                    self.ripples.append([self.bx, 0., 6])
+                else:
+                    f.mode, self.bite = "take", self.BITE
+                    self.splash(self.bx, 2)
+            elif r() < .004:
+                self.leave(f, 120)
+        elif f.mode == "take":
+            f.x = self.bx - (.4 if f.vx > 0 else -.4)
+            self.bite -= 1
+            if self.bite <= 0:                              # too slow: it got the worm and not the hook
+                self.bait = False
+                f.hunger = max(0., f.hunger - .3)
+                self.leave(f, 300)
+                self.say("missed it... the bait's gone. click to cast again", 5)
+        f.x, f.y = self.wet(f.x, f.y)
+
+    def leave(self, f, wary):
+        f.mode, f.wary = "swim", wary
+        f.vx = math.copysign(self.rng.uniform(.15, .3), f.x - self.bx)
+        if f is self.suitor:
+            self.suitor = None
+
+    def lay(self, f):
+        w = min(self.weeds, key=lambda s: abs(s[0] - f.x))
+        for _ in range(self.rng.randint(2, 5)):
+            self.eggs.append([w[0] + self.rng.choice((-1, 1)), w[1] - self.rng.randint(1, max(1, w[2] - 1)),
+                              self.rng.randint(700, 1300), f.kind])
+        f.hunger = min(1., f.hunger + .25)
+        if self.line in ("idle", "wait") and self.rng.random() < .5:
+            self.say(f"the {self.KINDS[f.kind][0]} are spawning in the weed", 4)
+
+    def weather(self, tw):
+        r = self.rng.random
+        S = self.SURF
+        for rp in self.ripples:
+            rp[1] += .3
+            rp[2] -= 1
+        self.ripples = [rp for rp in self.ripples if rp[2] > 0][-30:]
+        for d in self.drops:
+            d[0] += d[2]
+            d[1] += d[3]
+            d[3] += .12
+        self.drops = [d for d in self.drops if d[1] < S][-40:]
+        for s in self.specks:
+            s[0] = (s[0] + .03 + (r() - .5) * .04) % W
+            s[1] += (r() - .5) * .05
+            if not S + 1 < s[1] < self.ground[int(s[0])] - 1:
+                s[1] = S + 2 + r() * 30
+        for m in self.motes:
+            m[1] += .12
+        settled = [m for m in self.motes if m[1] >= self.ground[int(m[0])] - 1]
+        for m in settled:                                   # what dies feeds the weed
+            if self.weeds:
+                w = min(self.weeds, key=lambda s: abs(s[0] - m[0]))
+                w[4] = min(20, w[4] + 2)
+        self.motes = [m for m in self.motes if m[1] < self.ground[int(m[0])] - 1]
+        for w in self.weeds:
+            if w[2] < w[4] and r() < .002:
+                w[2] += 1
+            elif r() < .0004:
+                w[4] = max(6, w[4] - 1)
+                w[2] = min(w[2], w[4])
+        self.swarm = max(30., min(84., self.swarm + (r() - .5) * .3))
+        n = int(12 * tw)
+        while len(self.midges) < n:
+            self.midges.append([self.swarm + (r() - .5) * 8, S - 2 - r() * 5])
+        del self.midges[n:]
+        for m in self.midges:
+            m[0] += (self.swarm - m[0]) * .02 + (r() - .5) * .8
+            m[1] = max(S - 9., min(S - 1.5, m[1] + (r() - .5) * .7))
+
+    # ── the angler ──
+    def poke(self, x, y):
+        self.holding = True
+        f = self.suitor
+        if self.line in ("fight", "land", "cast"):
+            return
+        if f is not None and f.mode == "take":
+            self.hook(f)
+            return
+        if f is not None and f.mode == "nibble":
+            self.leave(f, 400)                              # struck at a nibble: spooked it
+            if self.rng.random() < .4:
+                self.bait = False
+            self.say("too soon! wait for the float to go right under", 4)
+            return
+        if x <= self.DOCK + 1 and y < self.SURF + 2:        # click the jetty to reel in and rest
+            if self.line != "idle":
+                self.line, self.suitor = "idle", None
+                self.say("reeled in", 2)
+            return
+        self.cast(x, y)
+
+    def release(self):
+        self.holding = False
+
+    def cast(self, x, y):
+        tx = max(24, min(84, x))
+        while self.ground[tx] < self.SURF + 6:
+            tx -= 1
+        self.depth = max(self.SURF + 2, min(self.ground[tx] - 2, y if y > self.SURF else self.SURF + 4))
+        if self.suitor is not None:
+            self.leave(self.suitor, 60)
+        tip = self.rod_tip()
+        self.fly = (tip[0], tip[1], 0, 8 + int(abs(tx - tip[0]) / 5))
+        self.bx, self.by = float(tx), float(self.SURF)
+        self.line, self.bait = "cast", True
+        self.msg = ("", 0)
+
+    def hook(self, f):
+        if self.stage(f) == 0:
+            self.leave(f, 600)
+            self.line, self.suitor, self.bait = "idle", None, False
+            self.say("a tiddler... slipped it back to grow", 4)
+            return
+        f.mode, f.stamina = "hooked", 1.
+        self.line, self.tension, self.slack, self.surge, self.warn = "fight", .3, 0, 0, 0
+        self.splash(f.x, 4)
+        self.say("fish on! hold to reel, let go when it runs", 3)
+
+    def lose(self, text):
+        f = self.suitor
+        self.leave(f, 900)
+        self.line, self.bait, self.tension = "idle", False, 0.
+        self.lost += 1
+        self.say(text, 4)
+
+    def line_step(self):
+        r = self.rng.random
+        S = self.SURF
+        if self.twitch:
+            self.twitch -= 1
+        if self.line == "cast":
+            x0, y0, k, n = self.fly
+            self.fly = (x0, y0, k + 1, n)
+            if k + 1 >= n:
+                self.line = "sink"
+                self.splash(self.bx, 3)
+                for f in self.fish:                         # the plop scares anything close
+                    if f.mode in ("swim", "rise") and abs(f.x - self.bx) < 7 and abs(f.y - S) < 14:
+                        f.mode, f.timer, f.wary = "flee", 30, 120
+                        f.vx = math.copysign(.6, f.x - self.bx)
+        elif self.line == "sink":
+            self.by += .4
+            if self.by >= self.depth:
+                self.by, self.line = self.depth, "wait"
+        elif self.line == "wait":
+            if self.suitor is None and self.bait:
+                L, tw = self.light, self.dusk
+                act = .5 + 1.1 * tw + .2 * (1 - L)
+                frac = (self.by - S - 2) / 34
+                for f in self.fish:
+                    if f.mode != "swim" or f.wary:
+                        continue
+                    d = math.hypot(f.x - self.bx, f.y - self.by)
+                    if d > 26:
+                        continue
+                    lo, hi = self.KINDS[f.kind][2]
+                    pref = 1.5 if lo - .1 <= frac <= hi + .1 else .4
+                    st = self.stage(f)
+                    p = self.LURE * f.hunger * act * pref * (1 - d / 26) * (.25, 1., .6)[st]
+                    if r() < p:
+                        self.suitor, f.mode = f, "court"
+                        break
+        elif self.line == "fight":
+            self.fight()
+        elif self.line == "land":
+            f = self.suitor
+            f.timer += 1
+            k = f.timer / 16
+            x0, y0 = self.LAND
+            f.x = x0 + (self.HAND[0] - x0) * k
+            f.y = y0 + (self.HAND[1] - 1 - y0) * k - math.sin(math.pi * k) * 5
+            if k >= 1:
+                self.fish.remove(f)
+                self.kept.append((f.kind, self.stage(f)))
+                self.suitor, self.line, self.bait = None, "idle", False
+                size = ("fry", "", "old ")[self.stage(f)]
+                self.say(f"landed a {size}{self.KINDS[f.kind][0]}! {len(self.fish)} left in the pond", 5)
+
+    def fight(self):
+        r = self.rng.random
+        f = self.suitor
+        pw = self.strength(f)
+        if self.warn:                                       # it shakes its head, then bolts
+            self.warn -= 1
+            if not self.warn:
+                self.surge = self.rng.randint(10, 30)
+        elif self.surge:
+            self.surge -= 1
+            f.stamina = max(0., f.stamina - .002)
+        elif r() < .03 * f.stamina:
+            self.warn = int(10 - 3 * pw)                    # big fish give less warning
+            if f.y < self.SURF + 4:
+                self.splash(f.x, 3)
+        pull = pw * (1.8 if self.surge else .45) * (.3 + .7 * f.stamina)
+        target = .25 + pull * .8 if self.holding else pull * .15
+        self.tension += (target - self.tension) * .16
+        if self.tension > 1:
+            self.lose("SNAP! too much pressure, the line broke")
+            return
+        if self.tension > .85 and r() < .012:
+            self.lose("the hook tore free... too much strain")
+            return
+        lx, ly = self.LAND
+        dx, dy = f.x - lx, f.y - ly
+        d = math.hypot(dx, dy) or 1.
+        if self.holding:
+            v = .3 - pull * .26
+            f.stamina = max(0., f.stamina - (.001 + .004 * self.tension) / pw)
+            self.slack = 0
+        else:
+            v = -pull * .3
+            f.stamina = min(1., f.stamina + .0012)
+            self.slack = self.slack + 1 if self.tension < .12 else 0
+            if self.slack > 48 and r() < .03:
+                self.lose("slack line... it threw the hook")
+                return
+        f.x -= dx / d * v
+        f.y -= dy / d * v + (r() - .5) * (.6 if self.surge or self.warn else .2)
+        f.x, f.y = self.wet(f.x, f.y)
+        f.vx = .1 if dx >= 0 else -.1                       # head pointing away, pulling
+        if self.surge and f.y < self.SURF + 3 and r() < .2:
+            self.splash(f.x, 1)
+        if math.hypot(f.x - lx, f.y - ly) < 2:
+            self.line, f.mode, f.timer = "land", "landing", 0
+            self.splash(f.x, 5)
+            for g in self.fish:                             # the commotion puts the others off for a while
+                if g.mode == "swim" and abs(g.x - lx) < 30:
+                    g.wary = max(g.wary, 400)
+
+    def rod_tip(self):
+        tx, ty = self.TIP
+        if self.line == "fight" and self.suitor:
+            f = self.suitor
+            dx, dy = f.x - tx, f.y - ty
+            d = math.hypot(dx, dy) or 1.
+            bend = 2 + self.tension * 6
+            return tx + dx / d * bend, ty + dy / d * bend
+        if self.line == "wait" and self.bite:
+            return tx + .5, ty + 2.
+        return float(tx), float(ty)
+
+    # ── drawing ──
+    def frame(self):
+        if self.out_at == self.steps:                       # sprites only move once per step
+            return self.out
+        out = bytearray(self.pix)
+        S = self.SURF
+        steps = self.steps
+
+        def put(x, y, v):
+            x, y = int(x), int(y)
+            if 0 <= x < W and 0 <= y < H:
+                out[y * W + x] = v
+
+        def curve(x0, y0, x1, y1, sag, v, under=None, dotted=False):
+            n = int(max(abs(x1 - x0), abs(y1 - y0)) * 1.4) + 1
+            for k in range(n + 1):
+                t = k / n
+                x = x0 + (x1 - x0) * t
+                y = y0 + (y1 - y0) * t + sag * 4 * t * (1 - t)
+                if dotted and k % 2:
+                    continue
+                if 0 <= int(x) < W and 0 <= int(y) < H and out[int(y) * W + int(x)] < self.FISH:
+                    put(x, y, under if under is not None and y >= S + 1 else v)
+
+        L = self.light
+        phase = (steps / self.DAY + self.clock0) % 1
+        day = phase < .25 or phase > .75
+        k = ((phase + .25) % 1) / .5 if day else (phase - .25) / .5
+        ox, oy = 6 + k * (W - 12), 13 - math.sin(math.pi * k) * 11
+        for dx in (0, 1):
+            for dy in (0, 1):
+                x, y = int(ox) + dx, int(oy) + dy
+                if 0 <= x < W and 0 <= y < S and out[y * W + x] < 20:
+                    out[y * W + x] = self.ORB
+        if not day:
+            for y in range(S, S + 5):
+                if (steps // 3 + y) % 3:
+                    put(ox + (steps // 5 + y) % 3 - 1, y, self.GLINT)
+        t = steps * .04
+        for x, base, h, ph, _ in self.weeds:
+            for j in range(h):
+                sway = 1.4 * math.sin(t + ph + j * .25) * (j / max(1, h)) ** 1.5
+                put(x + round(sway), base - 1 - j, self.WEED + min(3, j * 4 // max(1, h)))
+        for x, base, top, ph in self.reeds:
+            for y in range(top, base):
+                sway = math.sin(t * .8 + ph) * ((base - y) / (base - top)) ** 2 * 1.2
+                put(x + round(sway), y, self.REED + (0 if y == top else 1 + (y < S) + (y < top + 3)))
+        for x, y in self.specks:
+            put(x, y, self.SPECK)
+        for x, y, *_ in self.eggs:
+            put(x, y, self.EGG)
+        for x, y in self.motes:
+            put(x, y, self.MOTE)
+        for f in self.fish:
+            st = self.stage(f)
+            d = 1 if f.vx > 0 else -1
+            ix, iy = int(f.x), int(f.y)
+            fast = f.mode in ("hooked", "flee") or (f.mode == "nibble")
+            wag = (steps // (1 if fast else 4) + f.seed) % 2
+            b = self.FISH + f.kind * 5
+            cells = ((b + 4, b + 3), (b, b + 1, b + 3), (b, b + 1, b + 2, b + 3))[st]
+            for j, v in enumerate(cells):
+                ty = iy + (wag if j == len(cells) - 1 and iy < H - 1 else 0)
+                put(ix - j * d, ty, v)
+        for x, y in self.midges:
+            put(x, y, self.MIDGE)
+        for x, rad, life in self.ripples:
+            for sx in (-1, 1):
+                if rad > .5 or sx == 1:
+                    put(x + sx * rad, S, self.RIPPLE)
+            if rad < 1.5 and life > 8:
+                put(x, S - 1, self.SPLASH)
+        for x, y, *_ in self.drops:
+            put(x, y, self.SPLASH)
+        tx, ty = self.rod_tip()
+        hx, hy = self.HAND
+        n = 24                                              # the rod: a curve that bends with the strain
+        bend = self.tension * 3 if self.line == "fight" else 0
+        for j in range(n + 1):
+            u = j / n
+            put(hx + (tx - hx) * u, hy + (ty - hy) * u + bend * u * u, self.ROD)
+        tx, ty = hx + (tx - hx), hy + (ty - hy) + bend
+        if self.line == "idle":
+            curve(tx, ty, tx, ty + 4, 0, self.LINE)
+            put(tx, ty + 5, self.FLOATW)
+        elif self.line == "cast":
+            x0, y0, k, n = self.fly
+            u = k / n
+            fx = x0 + (self.bx - x0) * u
+            fy = y0 + (S - 1 - y0) * u - math.sin(math.pi * u) * 8
+            curve(tx, ty, fx, fy, 2, self.LINE)
+            put(fx, fy, self.FLOAT)
+        elif self.line in ("sink", "wait"):
+            dip = 2 if self.bite else 1 if self.twitch else 0
+            curve(tx, ty, self.bx, S - 2 + dip, 2.5, self.LINE)
+            curve(self.bx, S + 1, self.bx, self.by, 0, self.WET, self.WET, dotted=True)
+            put(self.bx, self.by, self.BAIT if self.bait else self.WET)
+            if dip < 2:
+                put(self.bx, S - 1 + dip, self.FLOAT)
+            if dip == 0:
+                put(self.bx, S, self.FLOATW)
+        elif self.line in ("fight", "land") and self.suitor:
+            f = self.suitor
+            curve(tx, ty, f.x, f.y, .3 if self.tension > .5 else 1.5, self.LINE, self.WET)
+            if self.line == "fight" and f.y > S:
+                u = (S - ty) / max(.1, f.y - ty)
+                put(tx + (f.x - tx) * u, S - 1, self.FLOAT)
+            if self.line == "fight":                        # the tension gauge
+                for j in range(20):
+                    put(W - 22 + j, 1, self.METER + 3 if j >= self.tension * 20 else
+                        self.METER + (0 if j < 11 else 1 if j < 16 else 2))
+        for j in range(min(3, len(self.kept))):             # tails poking out of the bucket
+            put(9 + j, 14, self.FISH + self.kept[-1 - j][0] * 5 + 3)
+        self.out, self.out_at = out, self.steps
+        return out
+
+    def animate(self, t):
+        p = self.palette
+        L, tw = self.light, self.dusk
+        dim = .28 + .72 * L
+        for k in range(16):
+            f = k / 15
+            c = mix(mix((5, 7, 20), (20, 28, 56), f), mix((88, 150, 214), (196, 224, 238), f), L)
+            p[k] = mix(c, mix((70, 62, 128), (252, 150, 92), f), tw * .75)
+        for k in range(4):
+            p[16 + k] = mix(p[3], (232, 234, 255), (1 - L) ** 2 * (.55 + .45 * math.sin(t * (1.3 + k * .4) + k * 2)))
+        for k in range(4):
+            p[20 + k] = mix(shade(mix((8, 12, 18), (44, 78, 58), L), .85 + k * .08), (36, 26, 44), tw * .5)
+        p[24] = shade((96, 140, 64), dim)
+        for k in range(3):
+            p[25 + k] = shade((92, 72, 48), dim * (.8 + k * .1))
+        for k in range(4):
+            p[28 + k] = shade((150, 112, 72), dim * (1.05 - k * .17))
+        top = mix(mix((14, 26, 40), (60, 120, 108), L), (130, 84, 70), tw * .35)
+        deep = mix((2, 6, 10), (12, 36, 32), L)
+        p[32] = mix(p[14], (255, 255, 255), .12 + .06 * math.sin(t * 1.3))
+        for k in range(15):
+            p[33 + k] = shade(mix(top, deep, k / 14), 1 + (.07 * math.sin(t * 1.1 + k * .9) if k < 4 else 0))
+        for k in range(4):
+            p[48 + k] = shade((70, 58, 40), dim * (1.05 - k * .1))
+            p[52 + k] = shade((104, 108, 112), dim * (.8 + k * .08))
+            p[56 + k] = shade(mix((40, 96, 50), (110, 168, 72), k / 3), dim)
+            p[64 + k] = shade(mix((120, 140, 70), (54, 84, 40), k / 3), dim)
+        p[60], p[61], p[62] = shade((70, 132, 62), dim), shade((52, 108, 52), dim), shade((246, 170, 200), dim)
+        p[68] = (255, 236, 170) if L >= .5 else (222, 226, 242)
+        p[69] = shade((200, 208, 236), (1 - L) * .9)
+        night = max(0., min(1., (.62 - L) / .4))
+        p[70] = mix((60, 52, 40), (255, 196, 100), night * (.88 + .12 * math.sin(t * 9) * math.sin(t * 4.3)))
+        strain = max(0., self.tension - .55) / .45 if self.line == "fight" else 0
+        p[72] = mix(shade((214, 214, 200), .45 + .55 * L), (255, 110, 80), strain)
+        p[73], p[74] = (236, 54, 40), shade((240, 240, 236), dim)
+        p[75] = mix(p[36], (200, 210, 200), .3)
+        p[76] = mix(p[32], (255, 255, 255), .45)
+        p[77] = shade((220, 236, 242), .5 + .5 * L)
+        p[78] = shade((250, 206, 120), .6 + .4 * L)
+        p[79] = mix((30, 28, 34), (120, 110, 130), 1 - L)
+        fishes = (((226, 230, 238), (176, 186, 204), (140, 150, 172), (214, 76, 58), (196, 206, 214)),
+                  ((206, 196, 86), (124, 154, 62), (72, 104, 44), (226, 112, 52), (184, 196, 120)),
+                  ((222, 170, 78), (176, 124, 52), (138, 94, 40), (112, 74, 38), (220, 186, 120)))
+        fd = .42 + .58 * L
+        for k, cols in enumerate(fishes):
+            for j, c in enumerate(cols):
+                p[80 + k * 5 + j] = shade(c, fd)
+        for k, c in enumerate(((70, 84, 58), (226, 180, 146), (64, 92, 120), (58, 44, 36))):
+            p[96 + k] = shade(c, dim)
+        p[100:104] = [(110, 210, 90), (240, 190, 60), (240, 70, 50), (30, 32, 40)]
+        p[104] = shade((132, 92, 56), dim)
+        p[105] = mix(p[38], (200, 210, 190), .18)
+        p[106] = shade((176, 172, 150), dim)
+        p[107] = shade((232, 120, 140), dim)
+
+    def status(self):
+        text, until = self.msg
+        if self.steps >= until or not text:
+            f = self.suitor
+            if self.line == "wait" and not self.bait:
+                text = "the bait's gone. click to cast again"
+            elif self.line == "wait" and f is not None and f.mode == "take":
+                text = "BITE! click!"
+            elif self.line == "wait" and f is not None and f.mode == "nibble":
+                text = "a nibble... wait for it"
+            elif self.line == "wait":
+                text = "waiting..."
+            elif self.line == "fight":
+                text = ("it's about to run!" if self.warn else "it's running, ease off!" if self.surge
+                        else "hold to reel in")
+            elif self.line == "idle":
+                text = "click the water to cast: deeper click, deeper bait"
+            else:
+                text = "letting the bait sink..." if self.line == "sink" else "casting..."
+        n = len(self.fish)
+        return text, f"{n} fish · {len(self.eggs)} eggs · {len(self.kept)} kept"
+
+    def vitals(self):
+        st = [self.stage(f) for f in self.fish]
+        return {"fish": len(self.fish), "fry": st.count(0), "adults": st.count(1), "old": st.count(2),
+                "eggs": len(self.eggs), "light": round(self.light, 2)}
+
+
+ENVIRONMENTS = [Tidepool, EmberForest, Crystal, Pulse, Fireflies, SlimeMold, Millpond]
 
 
 def app_dir():
@@ -985,6 +1720,7 @@ class App:
         self.clock = pygame.time.Clock()
         self.overlay_cache = {}
         self.drag = None
+        self.pressed = None                             # the world under a held mouse button
         self.last_click = (0, -1)
         self.shots = os.path.join(app_dir(), "shots")
         self.toast = ("", 0)
@@ -993,8 +1729,8 @@ class App:
             self.set_mode("mini")
 
     def shape(self):
-        """Shelf layout (cols, rows): 2x2 for four environments, 3x2 for up to six, then 3 rows."""
-        rows = 2 if len(self.envs) <= 6 else 3
+        """Shelf layout (cols, rows): 2x2 for four environments, up to 4x2 for eight, then 3 rows."""
+        rows = 2 if len(self.envs) <= 8 else 3
         return -(-len(self.envs) // rows), rows
 
     def default_size(self, mode):
@@ -1093,6 +1829,21 @@ class App:
         screen.blit(title, (box.x + 6, box.y + 3))
         screen.blit(mood, (box.x + 6, box.y + 3 + title.get_height()))
 
+    def status(self, screen, env, rect):
+        lines = [ln for ln in env.status() if ln]
+        if not lines:
+            return
+        imgs = [self.small.render(ln, True, (255, 214, 140) if k == 0 else (190, 198, 214)) for k, ln in enumerate(lines)]
+        box = self.pg.Rect(rect.x + 8, rect.y + 8, max(i.get_width() for i in imgs) + 12,
+                           sum(i.get_height() for i in imgs) + 6)
+        shade_ = self.pg.Surface(box.size, self.pg.SRCALPHA)
+        shade_.fill((6, 8, 14, 150))
+        screen.blit(shade_, box)
+        y = box.y + 3
+        for img in imgs:
+            screen.blit(img, (box.x + 6, y))
+            y += img.get_height()
+
     def env_at(self, pos):
         for k, rect in self.tiles(self.win.size):
             if rect.collidepoint(pos):
@@ -1158,9 +1909,14 @@ class App:
                     self.set_mode("single")
                 else:
                     self.envs[k].poke(x, y)
+                    self.pressed = k
                 self.last_click = (now, k)
-        elif e.type == pg.MOUSEBUTTONUP and e.button == 1:
-            self.drag = None
+        elif e.type == pg.MOUSEBUTTONUP and e.button in (1, 3) or e.type == pg.WINDOWFOCUSLOST:
+            if e.type == pg.WINDOWFOCUSLOST or e.button == 1:
+                self.drag = None
+            if self.pressed is not None and self.pressed < len(self.envs):
+                self.envs[self.pressed].release()
+            self.pressed = None
         elif e.type == pg.MOUSEMOTION and self.drag:
             px, py = self.win.position
             self.win_set(position=(px + e.pos[0] - self.drag[0], py + e.pos[1] - self.drag[1]))
@@ -1200,6 +1956,8 @@ class App:
                 self.draw_env(screen, self.envs[k], rect, t)
                 if self.labels and (self.mode != "mini" or hover):
                     self.label(screen, self.envs[k], rect)
+                    if self.mode != "grid" or rect.h >= 220:
+                        self.status(screen, self.envs[k], rect)
             msg, at = self.toast
             if now - at < 2.5:
                 img = self.small.render("saved " + msg, True, (255, 200, 120))

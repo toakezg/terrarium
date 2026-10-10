@@ -23,6 +23,7 @@ import os
 import random
 import sys
 import time
+from collections import Counter
 
 W, H = 96, 64                                       # every environment is 96x64 pixels
 
@@ -1079,6 +1080,7 @@ class Millpond(Env):
         for _ in range(11):
             f = self.spawn(r.uniform(22, 80), None, age=r.randrange(40000))
             f.age = min(f.age, int(f.life * .8))
+        self.known = {f.kind for f in self.fish}            # every kind the pond started with is worth restoring
         self.eggs, self.motes, self.ripples, self.drops, self.midges = [], [], [], [], []
         self.swarm = r.uniform(40, 80)
         self.stray = r.randint(2400, 4800)
@@ -1178,11 +1180,14 @@ class Millpond(Env):
             elif r() < .65 and len(self.fish) < self.K + 4:
                 self.spawn(e[0] + .5, e[1] - 1., e[3])
         self.eggs = hatched
-        if not pairs and not self.eggs:                     # fished out: wait for a stray from the stream
+        count = Counter(f.kind for f in self.fish)
+        viable = pairs | {e[3] for e in self.eggs} | {k for k, n in count.items() if n > 1}
+        missing = self.known - viable                       # a kind fished out: wait for a stray from the stream
+        if missing:
             self.stray -= 1
             if self.stray <= 0:
-                lone = [f.kind for f in self.fish if f.age >= self.ADULT]
-                kind = lone[0] if lone and r() < .7 else None
+                lone = [f.kind for f in self.fish if f.age >= self.ADULT and f.kind in missing]
+                kind = lone[0] if lone and r() < .7 else self.rng.choice(sorted(missing))
                 self.spawn(2., S + 6. + r() * 10, kind, self.ADULT + int(r() * 3000)).vx = .2
                 self.stray = self.rng.randint(2400, 4800)
                 if self.line in ("idle", "wait"):

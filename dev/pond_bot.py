@@ -79,11 +79,13 @@ def balance(seed=1, steps=RATE * 60 * 40):
 
 
 def pressure(rest, label, seed=2, minutes=60):
+    """rest: steps to sit out after each catch; None means nobody fishes, so the bot never ticks."""
     e = tr.Millpond(seed)
-    bot = Bot(e, e.rng.__class__(seed), rest)
+    bot = Bot(e, e.rng.__class__(seed), rest or 0)
     trace = []
     for s in range(RATE * 60 * minutes):
-        bot.tick()
+        if rest is not None:
+            bot.tick()
         e.step()
         if s % (RATE * 60 * 5) == 0:
             trace.append(len(e.fish))
@@ -96,4 +98,4 @@ if __name__ == "__main__":
     print()
     pressure(0, "greedy (recast at once)")
     pressure(RATE * 60 * 3, "patient (3 min rest per fish)")
-    pressure(10 ** 9, "nobody fishing")
+    pressure(None, "nobody fishing")
